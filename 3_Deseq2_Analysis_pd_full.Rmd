@@ -1,0 +1,424 @@
+---
+title: "R_Deseq2 analysis"
+output: html_document
+date: "2024-08-17"
+---
+
+Runs Deseq2 on all of the subtypes of cells 
+
+
+```{r}
+#plot tsne by genotype
+DimPlot(Pd_full, reduction = "tsne", label = FALSE, repel = TRUE, group.by = 'Genotype')
+ggsave("Genotype_tsne.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+```
+
+
+
+```{r}
+#remove mice with low numbers of counts (3 cells come from this mouse)
+PD_less_mouse_full <- subset(Pd_full, subset = Mouse != "4788")
+
+```
+
+Deseq2 analysis. Start by producing pseudobulks
+
+```{r}
+#Pseudobulking without cell types
+pseudo_pd_full <- AggregateExpression(PD_less_mouse_full, assays = "RNA", return.seurat = T, group.by = c("Genotype", "Mouse"))
+
+pseudo_pd_full$Genotype <- paste(pseudo_pd_full$Genotype)
+Idents(pseudo_pd_full) <- "Genotype"
+
+print(tail(Cells(pseudo_pd_full)))
+
+
+# #pseduobulking the individual cell types
+# pseudo_pd_celltype <- AggregateExpression(PD_less_mouse, assays = "RNA", return.seurat = T, group.by = c("sctype_classification","Genotype", "Mouse")) 
+# 
+# pseudo_pd_celltype$sctype_classification.Genotype <- paste(pseudo_pd_celltype$sctype_classification,pseudo_pd_celltype$Genotype, sep = "_" )
+# Idents(pseudo_pd_celltype) <- "sctype_classification.Genotype"
+# 
+# print(tail(Cells(pseudo_pd_celltype)))
+
+FindMarkers(object = pseudo_pd_full, 
+                         ident.1 = "ASO", 
+                         ident.2 = "WT",
+                         test.use = "DESeq2")
+
+```
+Normalization scheme:
+
+Scaling the total number of counts in each mouse to the average counts across all of the mice
+
+```{r}
+library(Matrix)
+#create the normalization factors for each mouse
+#extract the counts matrix
+A <- pseudo_pd_full[["RNA"]]$counts
+
+#produce normalization factor to multiply by for each mouse
+num_counts_norm_factor = mean((colSums(A))) / (colSums(A))
+
+#extract the counts matrix for the cell type specific aggregated expression
+B <- pseudo_pd_full[["RNA"]]$counts
+num_counts_norm_factor_celltype <- vector("numeric", length = length(B@Dimnames[[2]]))
+
+
+i <- 1
+for (j in B@Dimnames[[2]]){
+  #get the mouse genotype and number
+  # mouse <- paste(strsplit(j,split = "_")[[1]][2])
+  
+  #pull the associated normalization factor
+  norm_factor <- num_counts_norm_factor[j]
+  norm_factor<- unname(norm_factor)
+    
+  #append the factor onto a list of numbers corresponding to each row of the matrix
+  num_counts_norm_factor_celltype[i] <- norm_factor
+  
+  i <- i+1
+}
+
+#name the factors with the label they correspond to
+# names(num_counts_norm_factor_celltype) <-B@Dimnames[[2]]
+
+
+#normalize to number of counts in each mouse and scale to average counts across all mice
+#note, entries need to be integers, so all scaled values are rounded to the nearest whole number
+B <- round(t(t(B)*num_counts_norm_factor_celltype))
+
+
+#set the pseudo_pd_counts
+pseudo_pd_cell_num_norm <- pseudo_pd_full
+pseudo_pd_cell_num_norm <- SetAssayData(object = pseudo_pd_cell_num_norm, layer = "counts", new.data = B)
+
+#prepare Deseq2
+pseudo_pd_cell_num_norm$Genotype <- paste(pseudo_pd_cell_num_norm$Genotype)
+
+Idents(pseudo_pd_cell_num_norm) <- "Genotype"
+
+print(tail(Cells(pseudo_pd_cell_num_norm)))
+
+FindMarkers(object = pseudo_pd_cell_num_norm, 
+                         ident.1 = "ASO", 
+                         ident.2 = "WT",
+                         test.use = "DESeq2")
+
+```
+Check the levels of key neuronal marker genes
+
+```{r}
+library(plyr); library(dplyr)
+key_genes <- c("Syt1","Elavl4","Ret","Snap25")
+
+pseudo_bulk <- FetchData(pseudo_pd,vars = key_genes,layer = "counts")
+
+pseudo_bulk_celltype <- FetchData(pseudo_pd_celltype,vars = key_genes,layer = "counts")
+pseudo_bulk_celltype$normed <- FALSE
+
+pseudo_bulk_celltype.normed <- FetchData(pseudo_pd_cell_num_norm,vars = key_genes,layer = "counts")
+pseudo_bulk_celltype.normed$normed <- TRUE
+
+pseudo_bulk_celltype
+pseudo_bulk_celltype.normed 
+
+library(plyr)
+counts_by_celltype <- rbind(pseudo_bulk_celltype,pseudo_bulk_celltype.normed)
+write.csv(rbind(pseudo_bulk_celltype,pseudo_bulk_celltype.normed),"C:/Users/cpuki/SnRNAseq_Analysis_Revised/Pd_Figure/PB_Neuron_markers.csv")
+```
+
+
+Run Deseq2 on both with a specific subset of cell type
+
+```{r}
+save_dir <- "PD_figure/"
+library(magrittr)
+library(EnhancedVolcano)
+library(openxlsx)
+
+#custom high and low colors for ASO vs WT
+fc_cutoff <- 1.5
+#running the Deseq2 analysis
+wb = createWorkbook() #setting up for writing excel sheets
+
+
+
+for (Cell_type in unique(pseudo_pd_cell_num_norm$sctype_classification)){
+  cta <- paste(Cell_type,"ASO",sep = "_")
+  ctwt <-paste(Cell_type,"WT",sep = "_")
+
+  #Running with normalization
+  pseudo_pd_cell_num_norm.de <- FindMarkers(object = pseudo_pd_cell_num_norm, 
+                         ident.1 = cta, 
+                         ident.2 = ctwt,
+                         test.use = "DESeq2")
+  
+  pseudo_pd_cell_num_norm.de <- cbind("Gene"=rownames(pseudo_pd_cell_num_norm.de), pseudo_pd_cell_num_norm.de)
+  
+  #write the data into the excel worksheet
+  addWorksheet(wb, Cell_type)
+  writeData(wb, Cell_type, pseudo_pd_cell_num_norm.de)
+  
+  
+  ## plotting
+  #create custom key-value pairs for 'high', 'low', 'mid' expression by fold-change
+  # this can be achieved with nested ifelse statements
+  keyvals <- ifelse(
+    pseudo_pd_cell_num_norm.de$avg_log2FC < -fc_cutoff, '#00bfc4',
+      ifelse(pseudo_pd_cell_num_norm.de$avg_log2FC > fc_cutoff, '#f8766d',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == '#00bfc4'] <- 'Higher in WT'
+  names(keyvals)[keyvals == 'black'] 
+  names(keyvals)[keyvals == '#f8766d'] <- 'Higher in ASO'
+  
+  #Create volcano plot
+  print(EnhancedVolcano(pseudo_pd_cell_num_norm.de,
+    lab = rownames(pseudo_pd_cell_num_norm.de),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    ylab = bquote(~-Log[10]~ 'P'[adj]),
+    FCcutoff = fc_cutoff,
+    pCutoff = 0.01,
+    legendPosition = 'right',
+    pointSize = 4,
+    labSize = 14,
+    colAlpha = 1,
+    legendLabSize = 12,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0,
+    max.overlaps = 100,
+    colCustom = keyvals,
+    title = NULL, #paste(Cell_type,"Volcano Plot",sep = " "),
+    subtitle = NULL,
+    caption = NULL
+    ))+  ylim(0, 10) +
+    theme(axis.text.x = element_text(size = 45),  # Increase x-axis label size
+      axis.text.y = element_text(size = 45),
+      legend.position = "none",axis.title.x = element_blank(),
+        axis.title.y = element_blank()
+      ) 
+  ggsave(paste(Cell_type,"_Volcano_Plot.png",sep=""),
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 30, height = 20, units = "cm")
+}
+
+
+```
+
+Violin plots of raw expression of differential expressed genes. These are to be made bespoke for each gene of interest.
+
+```{r}
+#Genes/Cells of interest
+feature <- c("Gm15631")
+Cell_type <- c("PIN")
+#or
+# feature <- c("D030055H07Rik")
+# Cell_type <- c("PEMN")
+
+cta <- paste(Cell_type,"ASO",sep = "_")
+ctwt <-paste(Cell_type,"WT",sep = "_")
+
+VlnPlot(Pd,assay = "RNA",layer = 'scale.data',
+        features = feature,
+        idents=c(cta,ctwt),
+        add.noise=FALSE,
+        pt.size=0.75) + 
+        # (paste(feature,"Expression in",Cell_type,sep=" ")) +
+  
+  ggplot2::scale_fill_manual(values = c("#00bfc4","#f8766d"))+ ylab("Log Normalized Gene Expression") +    
+  theme(axis.text.y = element_text(size = 30),  # Increase x-axis label size
+      legend.position = "none",axis.text.x = element_blank(),
+        axis.title.y = element_blank(),axis.title = element_blank()
+      ) 
+        
+    ggsave(paste(feature,"Expression in",Cell_type,"log Normalized.png",sep="_"),
+      plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 25, height = 20, units = "cm")
+    
+```
+
+
+
+
+Lets also run Deseq2 on the samples pseudobulked by only genotype with normalization
+
+```{r}
+# scale to number of counts/mouse and scale to average counts across all mice
+#extract the counts matrix
+A <- pseudo_pd[["RNA"]]$counts
+
+#produce normalization factors to multiply by
+num_counts_norm_factor = mean(colSums(A)) / (colSums(A))
+
+#normalize to number of counts in each mouse and scale to average counts across all mice
+A <- round(t(t(A) * num_counts_norm_factor))
+
+
+#set the pseudo_pd_counts
+pseudo_pd.normed <- pseudo_pd
+pseudo_pd.normed <- SetAssayData(object = pseudo_pd.normed, layer = "counts", new.data = A)
+
+#run Deseq2
+pseudo_pd.normed$Genotype <- paste(pseudo_pd_cell_num_norm$Genotype)
+
+Idents(pseudo_pd.normed) <- "Genotype"
+
+pseudo_pd.normed.de <- FindMarkers(object = pseudo_pd.normed,
+                         ident.1 = "ASO",
+                         ident.2 = "WT",
+                         test.use = "DESeq2")
+
+print(pseudo_pd.normed.de)
+pseudo_pd.normed.de <- cbind("Gene"=rownames(pseudo_pd.normed.de), pseudo_pd.normed.de)
+
+  ## plotting
+  #create custom key-value pairs for 'high', 'low', 'mid' expression by fold-change
+  # this can be achieved with nested ifelse statements
+  keyvals <- ifelse(
+    pseudo_pd.normed.de$avg_log2FC < -fc_cutoff, '#00bfc4',
+      ifelse(pseudo_pd.normed.de$avg_log2FC > fc_cutoff, '#f8766d',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == '#00bfc4'] <- 'Higher in WT'
+  names(keyvals)[keyvals == 'black'] <- 'mid'
+  names(keyvals)[keyvals == '#f8766d'] <- 'Higher in ASO'
+
+  #Create volcano plot
+  print(EnhancedVolcano(pseudo_pd.normed.de,
+    lab = rownames(pseudo_pd.normed.de),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    ylab = bquote(~-Log[10]~ 'P'[adj]),
+    FCcutoff = fc_cutoff,
+    pCutoff = 0.01,
+    legendPosition = 'right',
+    labSize = 6.0,
+    colAlpha = 1,
+    legendLabSize = 12,
+    legendIconSize = 4.0,
+    drawConnectors = FALSE,
+    widthConnectors = 0.75,
+    max.overlaps = 100,
+    colCustom = keyvals,
+    title = NULL, #paste("All Cells","Volcano Plot",sep = " "),
+    subtitle = NULL,
+    caption = NULL,
+    )) +     theme(axis.text.x = element_text(size = 10),  # Increase x-axis label size
+      axis.text.y = element_text(size = 10),
+      legend.position = "none",axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+      ) 
+  #save the plot
+  ggsave(paste("All_Cells","_Volcano_Plot.png",sep=""),
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 9, height = 6, units = "cm")
+  
+  # #save the result in the workbook
+  # addWorksheet(wb, "All Cells")
+  # writeData(wb, "All Cells", pseudo_pd.normed.de)
+
+# #Save the workbook of all the Deseq2 outputs
+# saveWorkbook(wb, 'PD_figure/Deseq2_Results.xlsx')
+
+
+
+
+```
+
+
+```{r}
+Idents(Pd) <- Pd$sctype_classification
+VlnPlot(Pd,
+        features = c("D030055H07Rik"),
+        idents = c("PEMN"),
+        assay = "RNA",
+        layer = "scale.data",
+        group.by = "Genotype"
+)
+
+FeaturePlot(Pd,features = c("D030055H07Rik"),split.by = "Genotype")
+```
+
+Create a Volcano plot.
+
+```{r}
+library(magrittr)
+library(EnhancedVolcano)
+
+
+#custom high and low colors for ASO vs WT
+fc_cutoff <- 1.5
+ # create custom key-value pairs for 'high', 'low', 'mid' expression by fold-change
+  # this can be achieved with nested ifelse statements
+  keyvals <- ifelse(
+    pseudo_pd_cell_num_norm.de$avg_log2FC < -fc_cutoff, '#00bfc4',
+      ifelse(pseudo_pd_cell_num_norm.de$avg_log2FC > fc_cutoff, '#f8766d',
+        'black'))
+  keyvals[is.na(keyvals)] <- 'black'
+  names(keyvals)[keyvals == '#00bfc4'] <- 'Higher in WT'
+  names(keyvals)[keyvals == 'black'] <- 'mid'
+  names(keyvals)[keyvals == '#f8766d'] <- 'Higher in ASO'
+
+  
+  EnhancedVolcano(pseudo_pd_cell_num_norm.de,
+    lab = rownames(pseudo_pd_cell_num_norm.de),
+    x = 'avg_log2FC',
+    y = 'p_val',
+    FCcutoff = fc_cutoff,
+    pCutoff = 0.01,
+    legendPosition = 'right',
+    labSize = 6.0,
+    colAlpha = 1,
+    legendLabSize = 12,
+    legendIconSize = 4.0,
+    drawConnectors = FALSE,
+    widthConnectors = 0.75,
+    max.overlaps = 100,
+    colCustom = keyvals
+    )
+
+```
+
+KS testing between aggregated expression values
+
+Create a 10k log normed data object of the aggregated genes
+
+```{r}
+pseudo_pd.lognorm <- AggregateExpression(NormalizeData(PD_less_mouse), assays = "RNA", return.seurat = T, group.by = c("Genotype", "Mouse"))
+
+pseudo_pd.lognorm$counts
+```
+
+
+```{r}
+pseudo_pd.mouse <- AggregateExpression(PD_less_mouse, assays = "RNA", return.seurat = T, group.by = c("Mouse","Genotype"))
+pseudo_pd.genotype <- AggregateExpression(PD_less_mouse, assays = "RNA", return.seurat = T, group.by = c("Genotype"))
+
+#printing the idents names
+print(pseudo_pd.genotype@active.ident)
+
+#deciding the identities used and running the test
+A <- "ASO"
+W <- "WT"
+
+data.ASO <- unname(pseudo_pd.genotype[["RNA"]]$counts[, A])
+data.WT <- unname(pseudo_pd.genotype[["RNA"]]$counts[, W])
+ks.test(data.ASO,data.WT,
+        alternative = c("two.sided"))
+
+#plot an ecdf with the data
+ecdfWT <- ecdf(data.WT)
+ecdfASO <- ecdf(data.ASO)
+plot(ecdfWT, verticals=TRUE, do.points=FALSE, col='#00bfc4',xlim = c(0.01,1000))
+plot(ecdfASO, verticals=TRUE, do.points=FALSE, add=TRUE, col='#f8766d')
+
+```
+
+```{r}
+rownames(pseudo_pd.mouse@assays$RNA$counts) <- rep("gene", nrow(pseudo_pd.mouse@assays$RNA$counts)) 
+
+
+VlnPlot(pseudo_pd.mouse,features = c("gene"))
+```
+

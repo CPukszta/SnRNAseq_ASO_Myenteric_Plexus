@@ -1,0 +1,142 @@
+---
+title: "Gene Lists"
+output: html_document
+date: "2024-10-14"
+---
+
+10/19 Document to produce figure S3
+
+```{r}
+library(scCustomize)
+#create the averaged expression data objects
+Pd_avg <- AverageExpression(Pd,return.seurat = TRUE,group.by = "sctype_classification_num") #average the expression
+
+#new layer for % of cells with non zero expression
+Pd_avg[["RNA"]]$pct_exp <- Percent_Expressing(Pd,features = Features(Pd),entire_object = FALSE,layer= "counts", threshold = 0,group_by = "sctype_classification_num")
+
+sce_Pd.avg <- as.SingleCellExperiment(Pd_avg)
+```
+
+
+```{r}
+#neurotransmitter receptor list:
+library(biomaRt)
+ensembl <- useEnsembl(biomart = "genes",dataset = "mmusculus_gene_ensembl",host = 'useast.ensembl.org')
+
+```
+
+```{r}
+library(readxl)
+#gets gene symbol, transcript_id and go_id for all genes annotated with go terms below:
+go_terms <- c('GO:0015464','GO:0016907', #acetylcholine receptor activity "GO:0016907"
+              "GO:0016917", #GABA receptor activity 0016917 0004890
+              "GO:0008066", # glutamate receptor activity
+              "GO:0004993", #	serotonin receptor activity
+              "GO:0004985" # opioid receptor activity
+              # 'GO:0030594'  #neurotransmitter receptor activity
+              )
+#name the go terms
+go_term_descriptions <- c("acetylcholine receptor activity","G protein-coupled acetylcholine receptor activity","GABA receptor activity","glutamate receptor activity","serotonin receptor activity","opioid receptor activity")
+names(go_term_descriptions) <- go_terms
+# 
+# 
+gene.data <- getBM(attributes=c('external_gene_name','description','go_id'),
+                   filters = 'go', values = go_terms, mart = ensembl,uniqueRows = TRUE)
+print(gene.data)
+
+gene.data <- filter(gene.data, go_id %in% go_terms)
+gene.data <- gene.data %>% distinct(external_gene_name,.keep_all = TRUE)
+
+gene.data <- gene.data %>% group_by(go_id)
+gene.data <- arrange(gene.data,go_id,external_gene_name)
+# gene.data <- distinct(gene.data,external_gene_name,.keep_all = TRUE)
+
+# Reimporting gene list
+# gene.data <- read.csv("C:/users/cpuki/SnRNAseq_Analysis_Revised/ENS_profiling_Figure/Neurotransmitter_receptor_table.csv")
+
+#genes to remove:
+remove_genes <- c('Drd4')
+gene.data <- gene.data[!gene.data$external_gene_name == remove_genes, ]
+# gene.data <- arrange(gene.data,go_id,external_gene_name)
+# gene.data <- distinct(gene.data,external_gene_name,.keep_all = TRUE)
+
+#extra genes to add from other study:
+#Adcyap1r1, Adra2a, Gabrg3,
+
+
+#plot genes
+#to remove glia: cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]
+
+#expression
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name, 
+          slot = "scale.data",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,
+          group.colors = final.colors[levels(x = Pd_avg)], 
+          disp.min = -1.5, cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]
+          )+
+  scale_fill_gradientn(name = "Log1p(TP10k average expression)",colours = mapal)
+ggsave("neurotransmitter receptor expression heatmap no glia scale flipped.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 600, width = 20, height = 20, units = "cm")
+
+
+#% expressing
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name, slot = "pct_exp",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,group.colors = final.colors[levels(x = Pd_avg)],
+          disp.max = 100,cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]) + scale_fill_gradientn(name = "% of Cells Expresing Gene",colors = mapal)
+ggsave("neurotransmitter receptor pct Cells heatmap no glia.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 600, width = 20, height = 20, units = "cm")
+```
+
+
+```{r}
+#expression
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name, 
+          slot = "scale.data",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,
+          group.colors = final.colors[levels(x = Pd_avg)], 
+          disp.min = -1.5, cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]
+          )+
+  scale_fill_gradientn(name = "Log1p(TP10k average expression)",colours = mapal) + theme(text=element_text(family="Arial"))
+# ggsave("neurotransmitter receptor expression heatmap no glia scale flipped.png",
+#   plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 600, width = 20, height = 20, units = "cm")
+
+
+#% expressing
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name, slot = "pct_exp",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,group.colors = final.colors[levels(x = Pd_avg)],
+          disp.max = 100,cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]) + scale_fill_gradientn(name = "% of Cells Expresing Gene",colors = mapal)
+# ggsave("neurotransmitter receptor pct Cells heatmap no glia.png",
+#   plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 600, width = 20, height = 20, units = "cm")
+```
+Writing Sup Table 1 Sheet
+
+```{r}
+gene_data <- getBM(attributes=c('external_gene_name',"ensembl_gene_id","go_id","go_linkage_type",'description',"entrezgene_description"),
+                   filters = 'go', values = go_terms, mart = ensembl,uniqueRows = TRUE)
+
+gene_data <- filter(gene_data, go_id %in% go_terms)
+
+#combine evidence column 
+grouped_links <- gene_data %>%
+  group_by(external_gene_name) %>%
+  summarise(go_linkage_type = paste(go_linkage_type, collapse="/"))
+
+#combine with a df that does not have to evidence type
+gene_data <- getBM(attributes=c('external_gene_name',"ensembl_gene_id","go_id",'description',"entrezgene_description"),
+                   filters = 'go', values = go_terms, mart = ensembl,uniqueRows = TRUE)
+
+gene_data <- filter(gene_data, go_id %in% go_terms)
+
+gene_data <- merge(gene_data,grouped_links, by = "external_gene_name")
+gene_data$go_id_description <- go_term_descriptions[gene_data$go_id]
+gene_data<- gene_data %>% relocate(go_id_description, .after=go_id)
+gene_data
+
+#write csv
+setwd("C:/users/cpuki/SnRNAseq_Analysis_Revised/")
+write.csv(gene_data,
+          file = "ENS_profiling_Figure/Neurotransmitter_receptor_table.csv")
+```
+
+
+

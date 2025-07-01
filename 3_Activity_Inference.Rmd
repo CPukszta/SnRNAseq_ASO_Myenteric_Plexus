@@ -1,0 +1,207 @@
+---
+title: "DecouplR pathway activity"
+output: html_notebook
+---
+
+
+Note this notebook requires that "2_R_analysis.Rmd" be fully run and the object "Pd" be present in the environment.
+
+```{r}
+## We load the required packages
+library(Seurat)
+library(decoupleR)
+
+# Only needed for data handling and plotting
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(patchwork)
+library(ggplot2)
+library(pheatmap)
+```
+
+```{r}
+net <- get_progeny(organism = 'mouse', top = 500)
+net
+```
+```{r}
+setwd("C:/users/cpuki/SnRNAseq_Analysis_Revised/")
+#Export the net as a csv
+write.table(net , file = "Pd_figure/Pryogen_Net.csv")
+```
+
+
+Running the MLM
+
+```{r}
+# Extract the normalized log-transformed counts
+mat <- as.matrix(Pd@assays$RNA$scale.data)
+
+# Run mlm
+acts <- run_mlm(mat=mat, net=net, .source='source', .target='target',
+                .mor='weight', minsize = 5)
+
+
+acts
+
+```
+
+
+Creating a new assay called pathwaysmlm
+
+
+```{r}
+# Extract mlm and store it in pathwaysmlm in data
+Pd[['pathwaysmlm']] <- acts %>%
+  pivot_wider(id_cols = 'source', names_from = 'condition',
+              values_from = 'score') %>%
+  column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = Pd) <- "pathwaysmlm"
+
+# Scale the data
+Pd <- ScaleData(Pd)
+Pd@assays$pathwaysmlm@data <- Pd@assays$pathwaysmlm@scale.data
+```
+```{r}
+library(dplyr)
+library(stringr)
+#make a column of metadata for the cell type and the genotype data combined
+Pd$sctype_classification_geno <- paste(Pd$sctype_classification,Pd$Genotype,sep= '_')
+#set idents to be this column
+Idents(Pd)<- Pd$sctype_classification_geno
+
+
+# Extract activities from object as a long dataframe
+df <- t(as.matrix(Pd@assays$pathwaysmlm@data)) %>%
+  as.data.frame() %>%
+  mutate(cluster = Idents(Pd)) %>%
+  pivot_longer(cols = -cluster, names_to = "source", values_to = "score") %>%
+  group_by(cluster, source) %>% 
+  dplyr::summarize(mean = mean(score))
+
+df[c("Celltype","Genotype")]<- str_split_fixed(df$cluster, '_', 2)
+df <- df[order(df$Genotype, df$Celltype),]
+
+# Transform to wide matrix
+top_acts_mat <- df %>%
+  pivot_wider(id_cols = 'cluster', names_from = 'source',
+              values_from = 'mean')
+
+#rename the columns to have greek letters on the pathways
+colnames(top_acts_mat)[colnames(top_acts_mat) == "TGFb"] <- "TGFβ"
+colnames(top_acts_mat)[colnames(top_acts_mat) == "TNFa"] <- "TNFα"
+colnames(top_acts_mat)[colnames(top_acts_mat) == "NFkB"] <- "NFκB"
+
+
+top_acts_mat[c('Celltype', 'Genotype')] <- str_split_fixed(top_acts_mat$cluster, '_', 2) #split by cell and genotype
+top_acts_mat <- top_acts_mat[order(top_acts_mat$Celltype, top_acts_mat$Genotype),] #order by cell then genotype
+#remove the created columns
+top_acts_mat<-top_acts_mat[ , !(names(top_acts_mat) %in% c('Celltype', 'Genotype'))]
+top_acts_mat<- top_acts_mat%>%
+  column_to_rownames('cluster') %>%
+  as.matrix()
+```
+
+Plot the results!
+
+```{r}
+save_dir <- "C:/users/cpuki/SnRNAseq_Analysis_Revised/Pd_figure/"
+# Choose color palette
+palette_length = 256
+my_color = colorRampPalette(c("blue","white","red"))(palette_length)
+
+my_breaks <- c(seq(-2, 0, length.out=ceiling(palette_length/2) + 1),
+                seq(0.05, 2, length.out=floor(palette_length/2)))
+# Plot
+pheatmap(top_acts_mat, border_color = NA, color=my_color, breaks = my_breaks,
+          cluster_rows=FALSE,cluster_cols=FALSE,gaps_row=c(2,4,6,8),
+         filename=paste(save_dir,"Pathway_Activity_Inference.png"),
+         main = "Mean Pathway Activity Within Cell type")
+```
+
+Visualize the distributions of some of the key findings
+
+```{r}
+
+#define a function for calculating the median:
+median.stat <- function(x){
+    out <- quantile(x, probs = c(0.5))
+    names(out) <- c("ymed")
+    return(out) 
+}
+#mean function
+mean.stat <- function(x){
+    out <- mean(x)
+    names(out) <- c("ymean")
+    return(out) 
+}
+
+
+
+
+#mapK activity in inhibitory
+for (cell_type in unique(Pd$sctype_classification)){
+  print(cell_type)
+  cta <- paste(cell_type,"ASO",sep="_")
+  ctw <-paste(cell_type,"WT",sep="_")
+  nam <- paste("de.markers", cell_type, sep = ".")
+  assign(nam,FindMarkers(Pd, assay = "pathwaysmlm",ident.1 = cta, ident.2 = ctw,test.use="t"))
+  
+  print(eval(parse(text = nam)))
+  de_paths <- c(row.names(eval(parse(text = nam))[(eval(parse(text = nam))$p_val_adj <0.05),]))
+  if (length(de_paths) != 0){
+    for (path in de_paths){
+          print(VlnPlot(Pd,assay = "pathwaysmlm",
+        features = path,
+        idents=c(cta,ctw),pt.size = 0,
+        add.noise=FALSE) + ggtitle(paste(cell_type,path,"Pathway Activity",sep=" ")) +ylab("Pathway Activity") 
+        + ggplot2::scale_fill_manual(values = c("#00bfc4","#f8766d"))
+        + stat_summary(fun = mean, geom='crossbar', size = 0.25, colour = "black")
+        + theme(
+                axis.text.x=element_blank(),axis.title.x=element_blank(),
+                axis.text.y=element_text(size = 46), axis.title.y=element_blank(),
+                legend.position="none",plot.title = element_blank())
+                )
+        
+    ggsave(paste(cell_type,path,"Diff_Activity_Vln_plt.png",sep="_"),
+      plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 30, height = 20, units = "cm")
+    }
+    print(paste(cell_type,"has differential pathway activation of",de_paths,"with p-adj of",sep=" "))
+  }
+}
+
+```
+
+```{r}
+DefaultAssay(object = Pd) <- "pathwaysmlm"
+
+#define a function for calculating the median:
+median.stat <- function(x){
+    out <- quantile(x, probs = c(0.5))
+    names(out) <- c("ymed")
+    return(out) 
+}
+
+mean.stat <- function(x){
+    out <- mean(x)
+    names(out) <- c("ymed")
+    return(out) 
+}
+
+
+     print(VlnPlot(Pd,assay = "pathwaysmlm",
+        features = path,
+        idents=c(cta,ctw),pt.size = 0,
+        add.noise=FALSE) + ggtitle(paste(cell_type,path,"Pathway Activity",sep=" ")) +ylab("Pathway Activity") +ggplot2::scale_fill_manual(values = c("#00bfc4","#f8766d"))
+        +
+stat_summary(fun = median, geom='crossbar', size = 0.25, colour = "black")
+        
+        
+        
+        
+        )
+```
+

@@ -1,0 +1,628 @@
+---
+title: "Sctype Annotations"
+output:
+  html_document:
+    df_print: paged
+---
+
+Runs from reading in raw counts to cell type labeling and IHC markers
+
+Read in the data as a Seurat object
+
+```{r}
+#set working directory for whole notebook:
+setwd("C:/users/cpuki/SnRNAseq_Analysis_Revised/Data_Files")
+# load libraries
+lapply(c("dplyr","Seurat","HGNChelper","SeuratDisk","ggplot2"), library, character.only = T)
+require("Seurat.utils")
+
+#convert 
+SnRNAseq <- Read10X(data.dir = 'Seurat_matrix_files')
+
+#open meta data and make the cell_id the index
+metadata <- read.csv('Seurat_matrix_files/metadata.csv')
+rownames(metadata) <- metadata$X
+
+metadata$GFP_FACS_Expression <-  metadata$X525.50.GFP.Area
+metadata$Ruby_red_FACS_Expression <- metadata$X665.30.Dye.Cycle.Ruby.Area
+
+Pd_full <- CreateSeuratObject(counts = SnRNAseq, project = "PD",meta.data = metadata)
+
+Pd_full
+Pd_full[[]]
+
+
+```
+
+Quantifying the data and computing pertinent metrics including clustering the data
+
+
+```{r}
+Pd_full <- FindVariableFeatures(Pd_full, selection.method = "vst", nfeatures = 2000)
+
+#normalize data
+Pd_full <- NormalizeData(Pd_full, normalization.method = "LogNormalize", scale.factor = 10000)
+Pd_full <- FindVariableFeatures(Pd_full, selection.method = "vst", nfeatures = 2000)
+
+# scale and run PCA
+Pd_full <- ScaleData(Pd_full, features = rownames(Pd_full))
+Pd_full <- RunPCA(Pd_full, features = VariableFeatures(Pd_full))
+
+# Check number of PC components (we selected 30 PCs for downstream analysis, based on Elbow plot)
+ElbowPlot(Pd_full)
+
+# cluster and visualize
+Pd_full <- FindNeighbors(Pd_full, dims = 1:10)
+Pd_full <- FindClusters(Pd_full, algorithm = 4, resolution = 1.5) #algorithm = 4 gives leiden clustering
+Pd_full <- RunTSNE(Pd_full, dims = 1:10,perplexity = 20,iterations = 1000)
+```
+
+Remapping the clusters such that future removed clusters will be last in the list.
+
+```{r}
+#Renaming Filtered Clusters as the last clusters in the list
+library(dplyr)
+lapply(c("dplyr","Seurat","HGNChelper","SeuratDisk","ggplot2"), library, character.only = T)
+
+
+
+#Adding another meta data column for Cluster Removal
+Pd_full@meta.data <- Pd_full@meta.data %>%
+  mutate(Retain_Cluster = ifelse(seurat_clusters %in% c(3, 12, 8, 7, 10), FALSE, TRUE))
+
+# Create a mapping vector for renaming the removed clusters to the bottom of the numbered list
+map_values <- c('3' = 10,'7' = 11 , '8' = 12, '10' = 13, '12' = 14, #removed Clusters
+                '1' = 1, '2' = 2, '4' = 3, '5' = 4, '6' = 5, '9' = 6, '11' = 7, '13' = 8, '14' = 9)
+
+# Use mutate to create the new column based on the mapping
+Pd_full@meta.data <- Pd_full@meta.data %>%
+  mutate(seurat_clusters_renumbered = map_values[as.character(seurat_clusters)])
+Pd_full@meta.data['seurat_clusters_renumbered'] <- lapply(Pd_full@meta.data['seurat_clusters_renumbered'], as.factor)
+Pd_full_renumbered <- Pd_full
+Idents(object = Pd_full_renumbered) <- "seurat_clusters_renumbered"
+
+```
+
+
+
+
+```{r}
+save_dir <- "C:/users/cpuki/SnRNAseq_Analysis_Revised/Figure_2_files"
+
+#colors for clusters
+cols = DiscretePalette(14, palette = "alphabet2", shuffle = FALSE)
+
+#Tsne Plot of clusters for figure 2A
+DimPlot(Pd_full_renumbered, reduction = "tsne", label= TRUE,label.box = TRUE,cols = cols) + theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),axis.ticks=element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(),legend.position="none",
+          panel.background=element_blank(),panel.border=element_blank(),panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),plot.background=element_blank())
+
+#export the plot
+ggsave("Clustered_Tsne_renumbered.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500)
+
+
+#features plot with removed clusters boxed 
+features <- c("nCount_RNA","nFeature_RNA","percent_mito","pct_counts_ERCC","GFP_FACS_Expression","Ruby_red_FACS_Expression")
+
+#color of the removed clusters
+removed_color = "orange"
+color_vector <- c(rep("black", 9), rep(removed_color, 5))
+
+plots <- lapply(features, function(feature) {
+  p <- VlnPlot(Pd_full_renumbered, features = feature, split.by = c("seurat_clusters_renumbered"), add.noise=FALSE,cols = cols) +
+    geom_rect(aes(xmin = 9.5, xmax = 14.5, ymin = -Inf, ymax = Inf),color = "orange", fill = NA, size = 0.5) +  # Add box with orange lines
+    theme(axis.title.x = element_blank(), legend.position = "none" ) #remove x-axis label and legend
+  return(p)
+})
+
+#plotting the grid of plots
+library(gridExtra)
+grid.arrange(grobs = plots, ncol = 3,
+             widths = unit(rep(4, 3), "in"),   # Set width of each column (3 inches per plot)
+             # heights = unit(6, "in")
+             )
+
+# #save the violin plot layout
+ggsave("Violins_renumbered.png",
+  plot = grid.arrange(grobs = plots, ncol = 3),device = NULL,path = save_dir,scale = 1,dpi = 500,width = 12, height = 5, units = "in")
+```
+
+Producing other pertinent Plots. 
+
+```{r}
+DimPlot(Pd_full, reduction = "tsne", label= TRUE,label.box = TRUE)
+ggsave("Clustered_Tsne.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500)
+
+DimPlot(Pd_full, reduction = "tsne", group.by= "Mouse")
+ggsave("Mouse_colored_Tsne.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500)
+
+
+DimPlot(Pd_full, reduction = "tsne", group.by= "Genotype")
+ggsave("Genotype_colored_Tsne.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500)
+
+features <- c("nCount_RNA","nFeature_RNA","percent_mito","pct_counts_ERCC","GFP_FACS_Expression","Ruby_red_FACS_Expression")
+
+FeaturePlot(Pd_full,features)
+ggsave("Feature_Plot_TSNE.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+
+
+# VlnPlot(Pd_full, features = features, split.by = c("seurat_clusters"),ncol=2) &  theme(axis.title.x = element_blank())
+# ggsave("Violins.png",
+#   plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500,width = 20, height = 20, units = "cm")
+
+```
+Export Clusters to Python for futhur plotting and analysis.
+
+```{r}
+write.csv(Pd_full$seurat_clusters, file = "Sc_type/seurat_Clusters.csv")
+write.csv(Pd_full$seurat_clusters_renumbered, file = "Sc_type/seurat_Clusters_renum.csv")
+```
+
+Remove contamination clusters. These are being removed from the non-renumbered data file.
+
+```{r}
+Pd <- subset(Pd_full, subset = seurat_clusters != 10)
+print(Pd)
+Pd <- subset(Pd, subset = seurat_clusters != 7)
+print(Pd)
+Pd <- subset(Pd, subset = seurat_clusters != 8)
+print(Pd)
+Pd <- subset(Pd, subset = seurat_clusters != 3)
+print(Pd)
+Pd <- subset(Pd, subset = seurat_clusters != 12)
+print(Pd)
+
+DimPlot(Pd, reduction = "tsne")
+
+
+# recluster the data without these contamination groups
+Pd <- FindNeighbors(Pd, dims = 1:10)
+Pd <- FindClusters(Pd, algorithm = 1, resolution = 1.9) #algorithm = 4 gives leiden clustering
+
+DimPlot(Pd, reduction = "tsne")
+DimPlot(Pd, reduction = "tsne",label= TRUE,label.box = TRUE)
+```
+
+SCtype profiling of the reclustered data.
+
+```{r}
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+```
+
+Load in the marker genes and prepare the gene sets
+
+```{r}
+#DB File With our Marker Genes
+setwd("C:/users/cpuki/SnRNAseq_Analysis_Revised/")
+db_ <- "Sc_type/sctype_Genes_All.xlsx";
+tissue <- "PNS"
+
+# prepare gene sets
+gs_list <- gene_sets_prepare(db_, tissue)
+```
+
+Assign the cell types.
+
+```{r}
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(Pd[["RNA"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(Pd[["RNA"]]$scale.data) else as.matrix(Pd[["RNA"]]@scale.data)
+
+# run ScType
+es.max <- sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = NULL) #we set gs2 to NULL because we have no negative Markers
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. For raw (unscaled) count matrix set scaled = FALSE
+# When using Seurat, we use "RNA" slot with 'scale.data' by default. Please change "RNA" to "SCT" for sctransform-normalized data,
+# or to "integrated" for joint dataset analysis. To apply sctype with unscaled data, use e.g. Pd[["RNA"]]$counts or Pd[["RNA"]]@counts, with scaled set to FALSE.
+
+# merge by cluster
+cL_resutls <- do.call("rbind", lapply(unique(Pd@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(Pd@meta.data[Pd@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(Pd@meta.data$seurat_clusters==cl)), 10)
+}))
+sctype_scores <- cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] <- "Unknown"
+print(sctype_scores)
+```
+
+Add Sctype cell types to meta data and evaluate the final cell types
+
+```{r}
+save_dir <- "C:/users/cpuki/SnRNAseq_Analysis_Revised/ENS_profiling_Figure"
+library("colorspace")
+
+Pd@meta.data$sctype_classification = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  Pd@meta.data$sctype_classification[Pd@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+}
+
+
+#add numbered clusters to the metadata
+sctype_scores <- sctype_scores[order(sctype_scores$type),]
+sctype_scores$num <- sequence(rle(as.character(sctype_scores$type))$lengths)
+sctype_scores$type_num <- paste(sctype_scores$type, sctype_scores$num, sep="")
+
+#combine PIN clusters:
+#3 with 13 and 12 with 7
+sctype_scores[sctype_scores$cluster == 12,]$type_num <- sctype_scores[sctype_scores$cluster ==2,]$type_num
+sctype_scores[sctype_scores$cluster == 8,]$type_num <- sctype_scores[sctype_scores$cluster ==11,]$type_num
+
+
+#choose plotting colors
+colors = c("Peach","Greens","mint","Magenta","BrwnYl")
+names(colors) <- c("Glia", "PEMN", "PIMN", "PIN",  "PSN")
+
+# colors
+#initalize lists for the subtype and the color it will be
+final.colors <- list()
+final.names <- list()
+i <- 1
+for (j in unique(sctype_scores$type)){
+  #get color palete
+  nums = sctype_scores[sctype_scores$type == j,]$num #array of 1 to number of clusters
+  colors_pal <- sequential_hcl(max(nums)+1, palette = colors[j])
+  print(colors_pal)
+  
+  for (n in nums){
+    final.colors[i] <- colors_pal[n]
+    final.names[i] <- paste(j, n, sep="")
+    i <- i+1
+  }
+}
+final.names <- unlist(final.names)
+final.colors <- unlist(final.colors)
+names(final.colors) <- final.names
+
+
+#adding numbered classifications
+Pd@meta.data$sctype_classification_num = ""
+for(j in unique(sctype_scores$cluster)){
+  cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+  Pd@meta.data$sctype_classification_num[Pd@meta.data$seurat_clusters == j] = as.character(cl_type$type_num[1])
+}
+
+Idents(Pd) <- "sctype_classification_num"
+
+#lets plot!
+DimPlot(Pd, reduction = "tsne", label = TRUE, repel = TRUE, group.by = 'seurat_clusters') + theme(legend.text = element_text(size=18))
+ggsave("Reclustered.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+
+DimPlot(Pd, reduction = "tsne", label = TRUE, repel = TRUE, group.by = 'sctype_classification_num', cols = final.colors[levels(x = Pd)], label.box = TRUE, label.color = "white") +
+          #removing tick labels and cleaning up plot
+          theme(legend.text = element_text(size=18),
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank(),axis.ticks=element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(),legend.position="none",
+          panel.background=element_blank(),panel.border=element_blank(),panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),plot.background=element_blank())
+
+
+ggsave("Cell_types_numbered.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+
+DimPlot(Pd, reduction = "tsne", label = FALSE, repel = TRUE, group.by = 'sctype_classification_num', cols = final.colors[levels(x = Pd)]) + theme(legend.text = element_text(size=18))
+ggsave("Cell_types_numbered_unlabeled.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+
+
+DimPlot(Pd, reduction = "tsne", label = FALSE, repel = TRUE, group.by = 'sctype_classification')
+ggsave("Cell_types.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+
+
+DimPlot(Pd, reduction = "tsne", label = FALSE, repel = TRUE, group.by = 'Genotype')
+dev.off()
+
+DimPlot(Pd, reduction = "tsne", label = TRUE, repel = TRUE, group.by = 'Mouse',split.by = 'Genotype')   
+
+
+#write the sctype classifications to a csv for import into scanpy
+write.csv(Pd@meta.data[,c("sctype_classification","sctype_classification_num")],
+          file = "Sc_type/sctype_classification.csv")
+
+```
+```{r}
+DimPlot(Pd, reduction = "tsne", label = TRUE, repel = TRUE, group.by = 'sctype_classification_num', cols = final.colors[levels(x = Pd)], label.box = TRUE, label.color = "white",label.size = 7) +
+          #removing tick labels and cleaning up plot
+          theme(legend.text = element_text(size=18),
+          axis.text.x=element_blank(),
+          axis.text.y=element_blank(),axis.ticks=element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(),legend.position="none",
+          panel.background=element_blank(),panel.border=element_blank(),panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),plot.background=element_blank())
+
+
+ggsave("Cell_types_numbered.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 600, width = 20, height = 20, units = "cm")
+```
+
+Investigate marker genes to confirm sc-type classifications.
+
+```{r}
+save_dir <- "C:/users/cpuki/SnRNAseq_Analysis_Revised/ENS_profiling_Figure"
+sctype_scores
+
+#features<- c("Nos1", "Vip", "Gal", "Chat", "Penk","Tac1","Ache","Calcb","Calb2","Nefl")
+features_grouped <- 
+
+features_glia <- c("Sox10") #fill in here
+features_IPAN <- c("Chat","Nefl","Calca","Calcb","Calb2","Calr")
+features_PEMN <- c("Chat", "Tac1", "Calb2") #Chat vs Ache? "Tac1", "Tac2" = TK, "Slc18a3"
+
+#assigning numbers to PINs
+features_PIN <- c("Chat", "Nos1", "Htr1f","Htr2b","Htr2c","Htr4","Htr7","Sst")
+pin_1 <- c("Chat", "Slc18a3")
+pin_all <- c("Nos1", "Vip")
+pin_2 <- c("Calb2", "Sst")
+pin_3 <- c("Ddc", "Slc6a4")
+
+pin_all_all <- c(pin_all,pin_1,pin_2,pin_3)
+
+
+# features_grouped <- list("PEMN Genes" = features_PIMN, "PIMN Genes" = features_PIMN,"Glia" = features_glia)
+
+
+#clusters that got PIN: 3,2,14,15,8
+# DotPlot(Pd, features =  features_PIMN, group.by= "sctype_classification",dot.scale = 6,scale.by = "size")+ RotatedAxis()
+
+# VlnPlot(Pd, features = pin_all_all, split.by = c("RNA_snn_res.1.9"), idents = c(3,2,14,15,8) ,ncol=2)
+#choose colors
+#pal <- brewer.pal(n = 11, name = "YlGn")[2:9]
+pal <- c("#fcfd4e","#630f79")
+
+#Inhibitory neuron plot
+features_PIMN <- c("Nos1", "Vip", "Gal")
+
+FeaturePlot(Pd, features = features_PIMN, order = TRUE,ncol = 3,cols = pal)
+ggsave("PIMN_featplot.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 60, height = 20, units = "cm")
+
+
+
+#excitatory neuron plot
+
+features_PEMN <- c("Chat", "Tac1", "Calb2") #Chat vs Ache? "Tac1", "Tac2" = TK, "Slc18a3"
+FeaturePlot(Pd, features = features_PEMN, order = TRUE,ncol = 3,cols = pal)
+ggsave("PEMN_featplot.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 60, height = 20, units = "cm")
+
+
+# features <- list("PIMN" = features_PIMN, "PEMN" = features_PEMN,"PIN" = features_PIN,"IPAN" = features_IPAN)
+# 
+# DotPlot(Pd, features =  features_PIMN, group.by = "sctype_classification",dot.scale = 6,scale.by = "size") + RotatedAxis()
+# 
+# VlnPlot(Pd, features = features_IPAN,group.by = "sctype_classification")
+
+```
+
+
+Creating Averaged expression heat maps and % of cells expressing heat maps. Figure 3 B and C and Figure S4.
+
+
+```{r}
+library(scCustomize)
+#create the averaged expression data objects
+Pd_avg <- AverageExpression(Pd,return.seurat = TRUE,group.by = "sctype_classification_num") #average the expression
+
+#new layer for % of cells with non zero expression
+Pd_avg[["RNA"]]$pct_exp <- Percent_Expressing(Pd,features = Features(Pd),entire_object = FALSE,layer= "counts", threshold = 0,group_by = "sctype_classification_num")
+
+sce_Pd.avg <- as.SingleCellExperiment(Pd_avg)
+```
+
+
+```{r}
+save_dir <- "C:/users/cpuki/SnRNAseq_Analysis_Revised/ENS_profiling_Figure"
+library(scater)
+library(viridis)
+library("colorspace")
+IHC_markers <-c("Nos1", "Vip", "Gal", #Inhibitory "Npy"
+                "Chat", "Tac1", "Calb1","Calb2","Calcb","Slc18a3", #excitatory, "Slc18a3" = ach transporter, "Calca"
+                #"Tph1","Tph2",#Tryptophan hydroxylase responsible for serotonin syntheis, 2 is generally cns
+                "Slc6a4", #serotonin reuptake transporter
+                "Sst"#somatostatin
+                #interneurons
+                )
+
+#missing: "Adcyap1","Avil","Cartpt","Cck"
+#"Dbh","Gad1","Grm8",Grp",Nefl,Nefm,Nmu,Penk,Prph,Slc...,Sst,Tph2
+# "Nefm",
+#                 "Calca","Calr"
+
+# DotPlot(Pd,features = IHC_markers,group = "sctype_classification_num",scale=TRUE)+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0))
+
+# sequential_hcl(max(nums)+1, palette = colors[j])
+#  RColorBrewer::brewer.pal(11,"YlOrRd")
+
+mapal <- colorRampPalette(rev(sequential_hcl(11, palette = "OrRd")))(256)
+
+#removing Glia from the plot
+cells <- c("PEMN1", "PEMN2", "PEMN3", "PEMN4", "PIMN1", "PIMN2",  "PIN1",  "PIN2",  "PIN3",  "PSN1" )
+
+DoHeatmap(Pd_avg,features = IHC_markers, slot = "scale.data",group.by = "sctype_classification_num",size=8,draw.lines=FALSE,group.colors = final.colors[levels(x = Pd_avg)],cells = cells)+
+  scale_fill_gradientn(name = "Log1p(TP10k average expression)",colours = mapal) + theme(axis.text.y = element_text(size = 18))
+ggsave("IHC marker heatmap.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 800, width = 26, height = 20, units = "cm")
+
+DoHeatmap(Pd_avg,features = IHC_markers, slot = "pct_exp",group.by = "sctype_classification_num",
+          size=8,draw.lines=FALSE,group.colors = final.colors[levels(x = Pd_avg)],
+          disp.max = 100,cells = cells)+ scale_fill_gradientn(name = "% of Cells Expresing Gene",colors =mapal)+ theme(axis.text.y = element_text(size = 18))
+ggsave("IHC pct Cells heatmap.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 800, width = 26, height = 20, units = "cm")
+
+```
+
+
+Run Dirlechet multinational regression on the percentages of each cell type. The data frame comes from python analysis.
+
+
+
+```{r}
+#running multinomial regression
+library("DirichletReg")
+library(tidyverse)
+setwd("C:/users/cpuki/SnRNAseq_Analysis_Revised/")
+#produce a dataframe with variables 1 through m being different cell populations for each biological replicate (mouse) and 
+
+DReg_df <- read_csv('Pd_figure/Cell_Percentages_20240810.csv')
+
+#run the regression
+AL <- DR_data(DReg_df[,2:7])
+res <- DirichReg(AL ~ as.factor(Genotype_int),data = DReg_df)
+
+#summary shoes the results of the regression
+#estimate shows the direction of change
+#
+results <- summary(res)
+
+results
+
+```
+
+
+
+
+___________________
+Deprecaited:
+Pulling data from Biomart on the Go terms and producing both graphs and an excel file for the genes
+
+```{r}
+#neurotransmitter receptor list:
+library(biomaRt)
+ensembl <- useEnsembl(biomart = "genes",dataset = "mmusculus_gene_ensembl",host = 'useast.ensembl.org')
+
+```
+
+```{r}
+library(readxl)
+#gets gene symbol, transcript_id and go_id for all genes annotated with go terms below:
+go_terms <- c('GO:0015464','GO:0016907', #acetylcholine receptor activity "GO:0016907"
+              "GO:0004890", #GABA receptor activity 0016917
+              "GO:0008066", # glutamate receptor activity
+              "GO:0004993", #	serotonin receptor activity
+              "GO:0004985" # opioid receptor activity
+              # 'GO:0030594'  #neurotransmitter receptor activity
+              )
+#name the go terms
+go_term_descriptions <- c("acetylcholine receptor activity","G protein-coupled acetylcholine receptor activity","GABA receptor activity","glutamate receptor activity","serotonin receptor activity","opioid receptor activity")
+names(go_term_descriptions) <- go_terms
+# 
+# 
+gene.data <- getBM(attributes=c('external_gene_name','description','go_id'),
+                   filters = 'go', values = go_terms, mart = ensembl,uniqueRows = TRUE)
+print(gene.data)
+
+gene.data <- filter(gene.data, go_id %in% go_terms)
+gene.data <- gene.data %>% distinct(external_gene_name,.keep_all = TRUE)
+
+gene.data <- gene.data %>% group_by(go_id)
+gene.data <- arrange(gene.data,go_id,external_gene_name)
+gene.data <- distinct(gene.data,external_gene_name,.keep_all = TRUE)
+
+# Reimporting gene list
+# gene.data <- read.csv("C:/users/cpuki/SnRNAseq_Analysis_Revised/ENS_profiling_Figure/Neurotransmitter_receptor_table.csv")
+
+#genes to remove:
+remove_genes <- c('Drd4')
+gene.data <- gene.data[!gene.data$external_gene_name == remove_genes, ]
+# gene.data <- arrange(gene.data,go_id,external_gene_name)
+# gene.data <- distinct(gene.data,external_gene_name,.keep_all = TRUE)
+
+#extra genes to add from other study:
+#Adcyap1r1, Adra2a, Gabrg3,
+
+
+#plot genes
+#to remove glia: cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]
+
+#expression
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name, 
+          slot = "scale.data",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,
+          group.colors = final.colors[levels(x = Pd_avg)], 
+          disp.min = -1.5, cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]
+          )+
+  scale_fill_gradientn(name = "Log1p(TP10k average expression)",colours = mapal)
+ggsave("neurotransmitter receptor expression heatmap.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+
+
+#% expressing
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name, slot = "pct_exp",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,group.colors = final.colors[levels(x = Pd_avg)],
+          disp.max = 100,cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]) + scale_fill_gradientn(name = "% of Cells Expresing Gene",colors = mapal)
+ggsave("neurotransmitter receptor pct Cells heatmap.png",
+  plot = last_plot(),device = NULL,path = save_dir,scale = 1,dpi = 500, width = 20, height = 20, units = "cm")
+```
+
+
+```{r}
+# library(rlist)
+# 
+# list <- list.group(gene.data$external_gene_name, gene.data$go_id)
+# gene.data
+
+
+DoHeatmap(Pd_avg,features = gene.data$external_gene_name,
+          slot = "scale.data",group.by = "sctype_classification_num",
+          size=4,draw.lines=FALSE,
+          group.colors = final.colors[levels(x = Pd_avg)],
+          disp.min = -1.5
+          )+ #to remove glia: cells = Idents(Pd_avg)[! Idents(Pd_avg)%in% c('Glia1')]
+  scale_fill_gradientn(name = "Log1p(TP10k average expression)",colours = mapal)
+```
+
+
+Create a dataframe for the Go term genes
+
+
+```{r}
+gene_data <- getBM(attributes=c('external_gene_name',"ensembl_gene_id","go_id","go_linkage_type",'description',"entrezgene_description"),
+                   filters = 'go', values = go_terms, mart = ensembl,uniqueRows = TRUE)
+
+gene_data <- filter(gene_data, go_id %in% go_terms)
+
+#combine evidence column 
+grouped_links <- gene_data %>%
+  group_by(external_gene_name) %>%
+  summarise(go_linkage_type = paste(go_linkage_type, collapse="/"))
+
+#combine with a df that does not have to evidence type
+gene_data <- getBM(attributes=c('external_gene_name',"ensembl_gene_id","go_id",'description',"entrezgene_description"),
+                   filters = 'go', values = go_terms, mart = ensembl,uniqueRows = TRUE)
+
+gene_data <- filter(gene_data, go_id %in% go_terms)
+
+gene_data <- merge(gene_data,grouped_links, by = "external_gene_name")
+gene_data$go_id_description <- go_term_descriptions[gene_data$go_id]
+gene_data<- gene_data %>% relocate(go_id_description, .after=go_id)
+gene_data
+
+#write csv
+setwd("C:/users/cpuki/SnRNAseq_Analysis_Revised/")
+write.csv(gene_data,
+          file = "ENS_profiling_Figure/Neurotransmitter_receptor_table.csv")
+```
+
+
+
