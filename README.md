@@ -1,2 +1,2 @@
 # SnRNAseq_ASO_Myenteric_Plexus
-Github repository associated with Pukszta et al. containing code to analyze data
+Github repository associated with Pukszta et al. 2020 "Single-nuclei transcriptome of enteric neurons in α-synuclein overexpressing mice". Contains code to analyze single-cell RNA-seq data. Files are numbered in the order they were run to produce final results. Raw and post-processing data files are available on the Gene Expression Omnibus (GEO) at accession number 297092 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE297092).
